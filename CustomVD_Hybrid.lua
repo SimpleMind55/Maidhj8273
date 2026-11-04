@@ -16078,7 +16078,7 @@ end
 local function fn354()
     local var1209 = library:Window({
         Title = "VD Hub",
-        Image = "84034353458936",
+        Image = "https://i.pinimg.com/originals/9d/af/64/9daf64aded7c6e25e857f4004404b950.jpg",
         Footer = "Violence District",
         Author = "",
         Color = color3,
@@ -16086,19 +16086,7 @@ local function fn354()
         Search = true,
         Folder = "VDHub",
     })
-    var1209:InfoTab({
-        Name = "Info",
-        Icon = "info",
-        SectionTitle = "Information",
-        Banner = "79662603577585",
-        BannerAspectRatio = 3.2,
-        Version = str,
-        DiscordLink = "https://discord.gg/pWpgqVGxNK",
-        DiscordName = "",
-        DiscordText = "Gabung untuk update & support.",
-        DiscordDesc = "Made by 11rill — features: Killer & Survivor Hitbox/ESP, Auto Aim, Auto Generator, Killer Warn, Camera Veil, and many more.",
-        CardsWidget = {{catwidget = "rbxassetid://117486345000318"}},
-    })
+
     local var1210 = var1209:AddTab({Name = "Exclusive", Icon = "sparkles"})
     local var1211 = var1209:AddTab({Name = "Killer", Icon = "swords"})
     local var1212 = var1209:AddTab({Name = "Survivor", Icon = "user"})
