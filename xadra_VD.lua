@@ -11651,7 +11651,7 @@ do
             imageLabel4.Position = UDim2.fromOffset(var955, iconY)
             imageLabel4.Size = UDim2.new(0, num93, 0, num93)
             imageLabel4.BackgroundTransparency = 1
-            imageLabel4.Image = "rbxassetid://84034353458936"
+            imageLabel4.Image = "rbxassetid://139024834104741"
             imageLabel4.ZIndex = 2
             imageLabel4.Parent = gui
             local tbl84 = {}
@@ -11663,7 +11663,7 @@ do
                 imageLabel5.Position = UDim2.fromOffset(var955 - pad, iconY - pad)
                 imageLabel5.Size = UDim2.new(0, num93 + pad * 2, 0, num93 + pad * 2)
                 imageLabel5.BackgroundTransparency = 1
-                imageLabel5.Image = "rbxassetid://84034353458936"
+                imageLabel5.Image = "rbxassetid://139024834104741"
                 imageLabel5.ImageColor3 = Color3.new(0, 0, 0)
                 imageLabel5.ImageTransparency = transp
                 imageLabel5.ZIndex = 1
@@ -16078,7 +16078,7 @@ end
 local function fn354()
     local var1209 = library:Window({
         Title = "x adra",
-        Image = "84034353458936",
+        Image = "139024834104741",
         Footer = "Violence District",
         Author = "x adra",
         Color = color3,
