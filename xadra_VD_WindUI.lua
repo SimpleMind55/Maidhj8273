@@ -247,19 +247,42 @@ local function __makeHost(windParent, hostName)
 
     function host:AddTargetSelector(cfg)
         cfg = cfg or {}
-        -- emulate as dropdown + toggle
-        local opts = cfg.Options or { "KILLER", "SURVIVOR", "ZOMBIE" }
+        -- Prefer Values (display) over Options (internal keys)
+        local opts = cfg.Values or cfg.Options or { "KILLER", "SURVIVOR", "ZOMBIE" }
+        if type(opts) ~= "table" then opts = { tostring(opts) } end
+        local list = {}
+        for k, v in pairs(opts) do
+            if type(k) == "number" then table.insert(list, v) end
+        end
+        if #list == 0 then
+            for _, v in ipairs(opts) do table.insert(list, v) end
+        end
+        -- normalize common gen modes
+        local map = {
+            INSTANT = "Instant", PERFECT = "Perfect", NORMAL = "Normal", RANDOM = "Random",
+            Instant = "Instant", Perfect = "Perfect", Normal = "Normal", Random = "Random",
+        }
+        for i, v in ipairs(list) do
+            list[i] = map[v] or v
+        end
+        local def = cfg.Default or list[1]
+        def = map[def] or def
+        local userCb = cfg.DropdownCallback or cfg.Callback
         self:AddDropdown({
-            Title = cfg.DropdownTitle or cfg.Title or "Target",
-            Options = opts,
-            Default = opts[1],
-            Callback = cfg.DropdownCallback or cfg.Callback,
+            Title = cfg.DropdownTitle or (cfg.Title and (cfg.Title .. " Mode")) or "Target",
+            Options = list,
+            Default = def,
+            Callback = function(v)
+                v = map[v] or v
+                if type(userCb) == "function" then userCb(v) end
+            end,
         })
-        if cfg.Title then
+        -- Only add extra toggle if it's not the same as Auto Generator style (has ButtonTitle panel)
+        if cfg.Title and not cfg.ButtonTitle then
             self:AddToggle({
                 Title = cfg.Title,
-                Default = cfg.Default,
-                Callback = cfg.ToggleCallback or cfg.Callback,
+                Default = cfg.Default == true,
+                Callback = cfg.ToggleCallback,
             })
         end
         return {}
@@ -17478,12 +17501,72 @@ local var1210 = var1209:AddTab({Name = "Exclusive", Icon = "sparkles"})
         })
     end
     do
+        local varAPSec = var1212:AddSection("Auto Parry (SWAGA)", nil)
+        varAPSec:AddToggle({
+            Title = "Show AP Button",
+            Default = false,
+            Callback = function(v)
+                if getgenv().XadraAutoParry and getgenv().XadraAutoParry.setButtonVisible then
+                    getgenv().XadraAutoParry.setButtonVisible(v)
+                else
+                    getgenv().XadraShowAPButton = v
+                end
+            end,
+        })
+        varAPSec:AddToggle({
+            Title = "Auto Parry",
+            Default = false,
+            Callback = function(v)
+                if getgenv().XadraAutoParry and getgenv().XadraAutoParry.set then
+                    getgenv().XadraAutoParry.set(v)
+                end
+                -- show button when enabling AP from menu
+                if v and getgenv().XadraAutoParry and getgenv().XadraAutoParry.setButtonVisible then
+                    getgenv().XadraAutoParry.setButtonVisible(true)
+                end
+            end,
+        })
+        varAPSec:AddToggle({
+            Title = "Auto Parry V2",
+            Default = false,
+            Callback = function(v)
+                if getgenv().XadraAutoParry and getgenv().XadraAutoParry.setV2 then
+                    getgenv().XadraAutoParry.setV2(v)
+                end
+            end,
+        })
+        varAPSec:AddSlider({
+            Title = "AP Range",
+            Min = 5, Max = 30, Default = 10, Step = 1,
+            Callback = function(v)
+                if getgenv().XadraAutoParry and getgenv().XadraAutoParry.setRange then
+                    getgenv().XadraAutoParry.setRange(v)
+                end
+            end,
+        })
+        varAPSec:AddSlider({
+            Title = "AP V2 Range",
+            Min = 5, Max = 40, Default = 20, Step = 1,
+            Callback = function(v)
+                if getgenv().XadraAutoParry and getgenv().XadraAutoParry.setRangeV2 then
+                    getgenv().XadraAutoParry.setRangeV2(v)
+                end
+            end,
+        })
+        varAPSec:AddParagraph({
+            Title = "SWAGA method",
+            Content = "Float button appears when Show AP Button or Auto Parry is on. Tap button = toggle AP.",
+        })
         local var1256 = var1212:AddSection("Auto Generator", nil)
         var1256:AddToggle({
             Title = "Auto Generator",
             Default = tbl.flag76,
             Callback = function(arg291)
                 tbl.flag76 = arg291
+                -- normalize mode string
+                local m = tostring(tbl.str1 or "Instant")
+                local map = {INSTANT="Instant",PERFECT="Perfect",NORMAL="Normal",RANDOM="Random"}
+                tbl.str1 = map[m] or m
             end,
         })
         var1256:AddParagraph({
@@ -17499,7 +17582,9 @@ local var1210 = var1209:AddTab({Name = "Exclusive", Icon = "sparkles"})
             Default = tbl.str1,
             Callback = function(arg292)
                 if arg292 then
-                    tbl.str1 = arg292
+                    local map = {INSTANT="Instant",PERFECT="Perfect",NORMAL="Normal",RANDOM="Random",
+                        Instant="Instant",Perfect="Perfect",Normal="Normal",Random="Random"}
+                    tbl.str1 = map[arg292] or arg292
                 end
             end,
         })
@@ -17696,79 +17781,24 @@ local var1210 = var1209:AddTab({Name = "Exclusive", Icon = "sparkles"})
         })
         local var1268 = var1212:AddSection("Moonwalk", nil)
         var1268:AddToggle({
-            Title = "Enable Moonwalk (Mobile GUI)",
+            Title = "Auto-Moonwalk (SWAGA)",
             Default = false,
-            Callback = function(arg310)
-                tbl.flag99 = arg310
-                if arg310 then
-                    var307()
-                    if tbl2.field33 then
-                        tbl2.field33.Enabled = true
-                    end
+            Callback = function(on)
+                if getgenv().XadraMoonwalk and getgenv().XadraMoonwalk.set then
+                    getgenv().XadraMoonwalk.set(on)
                 else
-                    if tbl2.field33 then
-                        tbl2.field33.Enabled = false
-                    end
-                    tbl2.num149 = 0
-                    tbl2.flag150 = false
-                    tbl2.flag151 = false
+                    getgenv().XadraMoonwalkWant = on and true or false
+                end
+                -- disable old Bolong mobile GUI path
+                tbl.flag99 = false
+                if tbl2.field33 then
+                    tbl2.field33.Enabled = false
                 end
             end,
         })
-        var1268:AddDropdown({
-            Title = "Moonwalk Mode",
-            Content = "Classic = lock murni versi lama. Sway = versi goyang kiri-kanan.",
-            Options = {"Classic", "Sway"},
-            Default = "Classic",
-            Callback = function(arg311)
-                tbl.str15 = arg311
-            end,
-        })
-        var1268:AddSlider({
-            Title = "Sway Width",
-            Content = "Lebar goyangan kiri-kanan (khusus mode Sway)",
-            Min = 0.1,
-            Max = 1.5,
-            Default = 0.55,
-            Increment = 0.05,
-            Callback = function(arg312)
-                tbl.num123 = arg312
-            end,
-        })
-        var1268:AddSlider({
-            Title = "Sway Speed",
-            Content = "Kecepatan flip goyangan (khusus mode Sway)",
-            Min = 1,
-            Max = 12,
-            Default = 6,
-            Increment = 0.5,
-            Callback = function(arg313)
-                tbl.num124 = arg313
-            end,
-        })
-        var1268:AddKeybind({
-            Title = "PC Lock Forward Key",
-            Default = Enum.KeyCode.Unknown,
-            Callback = function()
-                if tbl.flag99 then
-                    tbl2.flag150 = not tbl2.flag150
-                    if tbl2.flag150 then
-                        tbl2.flag151 = false
-                    end
-                end
-            end,
-        })
-        var1268:AddKeybind({
-            Title = "PC Lock Backward Key",
-            Default = Enum.KeyCode.Unknown,
-            Callback = function()
-                if tbl.flag99 then
-                    tbl2.flag151 = not tbl2.flag151
-                    if tbl2.flag151 then
-                        tbl2.flag150 = false
-                    end
-                end
-            end,
+        var1268:AddParagraph({
+            Title = "SWAGA method",
+            Content = "Turns character backward while moving (AutoRotate off + yaw to -MoveDirection + light sway).",
         })
         local var1269 = var1212:AddSection("Fast Vault Op", nil)
         var1269:AddToggle({
@@ -19257,6 +19287,8 @@ task.spawn(function()
     floatBtn.AutoButtonColor = false
     floatBtn.ZIndex = 200
     floatBtn.Parent = fsg
+    floatBtn.Visible = false
+    fsg.Enabled = true
     Instance.new("UICorner", floatBtn).CornerRadius = UDim.new(1, 0)
     local fstroke = Instance.new("UIStroke", floatBtn)
     fstroke.Color = Color3.fromRGB(80, 80, 100)
@@ -19389,13 +19421,109 @@ task.spawn(function()
     end
 
     -- expose for optional external toggle
+    local function setButtonVisible(vis)
+        floatBtn.Visible = vis and true or false
+        if not vis then
+            panel.Visible = false
+        end
+    end
+    -- deferred show if menu toggled before this loaded
+    if getgenv().XadraShowAPButton then
+        setButtonVisible(true)
+    end
     getgenv().XadraAutoParry = {
         set = setAP,
         setV2 = setAP2,
-        setRange = function(r) AP.Range = r end,
-        setRangeV2 = function(r) AP2.Range = r end,
+        setRange = function(r) AP.Range = tonumber(r) or AP.Range end,
+        setRangeV2 = function(r) AP2.Range = tonumber(r) or AP2.Range end,
+        setButtonVisible = setButtonVisible,
         isOn = function() return AP.Enabled end,
     }
 
     print("[x adra] SWAGA Auto Parry suite + float button ready")
 end)
+
+--[[ ========== x adra · SWAGA Auto-Moonwalk ========== ]]
+task.spawn(function()
+    local Players = game:GetService("Players")
+    local RunService = game:GetService("RunService")
+    local LP = Players.LocalPlayer
+
+    local function getRoot(char)
+        if not char then return nil end
+        return char:FindFirstChild("HumanoidRootPart")
+            or char:FindFirstChild("Torso")
+            or char:FindFirstChild("UpperTorso")
+    end
+    local function getHum(char)
+        return char and char:FindFirstChildOfClass("Humanoid")
+    end
+
+    local MW = {
+        Enabled = false,
+        CurrentYaw = 0,
+        Connection = nil,
+    }
+
+    local function stop()
+        if MW.Connection then
+            MW.Connection:Disconnect()
+            MW.Connection = nil
+        end
+        MW.CurrentYaw = 0
+        local char = LP.Character
+        local hum = getHum(char)
+        if hum then
+            hum.AutoRotate = true
+        end
+    end
+
+    local function start()
+        stop()
+        if not MW.Enabled then return end
+        local char = LP.Character
+        local root = getRoot(char)
+        if root then
+            local _, y, _ = root.CFrame:ToEulerAnglesXYZ()
+            MW.CurrentYaw = y
+        end
+        MW.Connection = RunService.RenderStepped:Connect(function(dt)
+            if not MW.Enabled then return end
+            local c = LP.Character
+            if not c then return end
+            local root = getRoot(c)
+            local hum = getHum(c)
+            if not root or not hum then return end
+            hum.AutoRotate = false
+            if hum.MoveDirection.Magnitude > 0.1 then
+                local md = -hum.MoveDirection
+                local sway = math.sin(tick() * 35) * 0.8
+                local target = math.atan2(-md.X, -md.Z) + sway
+                local diff = (target - MW.CurrentYaw) % (math.pi * 2)
+                if diff > math.pi then
+                    diff = diff - math.pi * 2
+                end
+                -- SWAGA: CurrentYaw += diff * (1-0.9) * dt * 60  => * 0.1 * dt * 60
+                MW.CurrentYaw = MW.CurrentYaw + diff * 0.1 * dt * 60
+                root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, MW.CurrentYaw, 0)
+            end
+        end)
+    end
+
+    local function set(on)
+        MW.Enabled = on and true or false
+        if MW.Enabled then start() else stop() end
+    end
+
+    LP.CharacterAdded:Connect(function()
+        task.wait(0.3)
+        if MW.Enabled then start() end
+    end)
+
+    getgenv().XadraMoonwalk = { set = set, isOn = function() return MW.Enabled end }
+    if getgenv().XadraMoonwalkWant then
+        set(true)
+    end
+    print("[x adra] SWAGA Auto-Moonwalk ready")
+end)
+
