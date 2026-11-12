@@ -1,7 +1,6 @@
 --[[
-  x adra · Degrade
+  x adra · Degrade (Mobile optimized)
   PlaceId: 129437813830973
-  WindUI · ESP / Combat / Visual
 ]]
 
 local PLACE_ID = 129437813830973
@@ -10,16 +9,21 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
 local Lighting = game:GetService("Lighting")
-local TweenService = game:GetService("TweenService")
 local CoreGui = game:GetService("CoreGui")
 
 local LP = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
+local Mouse = LP:GetMouse()
 
--- soft place check (warn only)
+local IS_MOBILE = UIS.TouchEnabled and not UIS.KeyboardEnabled
+-- some executors report both; prefer touch-primary
+if UIS.TouchEnabled and UIS.GyroscopeEnabled then
+	IS_MOBILE = true
+end
+
 pcall(function()
 	if game.PlaceId ~= PLACE_ID then
-		warn("[x adra] PlaceId differs from Degrade target — script still runs")
+		warn("[x adra] different PlaceId — still running")
 	end
 end)
 
@@ -31,21 +35,23 @@ local WindUI = loadstring(game:HttpGetAsync("https://github.com/Footagesus/WindU
 local S = {
 	ESP = {
 		Enabled = false,
-		MaxDist = 400,
+		MaxDist = IS_MOBILE and 500 or 800,
 		ShowName = true,
-		TextSize = 14,
+		TextSize = IS_MOBILE and 16 or 14,
 		ShowTool = true,
-		ShowSkeleton = true,
+		ShowSkeleton = false, -- Drawing lines often crash mobile
 		TeamCheck = false,
+		FocusName = "", -- substring / exact name → red label
 	},
 	Combat = {
 		Aimbot = false,
 		Silent = false,
-		FOV = 120,
+		FOV = IS_MOBILE and 90 or 120,
 		ShowFOV = true,
-		Smooth = 0.18,
+		Smooth = 0.22,
 		TeamCheck = true,
 		AimPart = "Head",
+		MaxDist = 300, -- aimbot / silent max world distance
 	},
 	Visual = {
 		Fullbright = false,
@@ -53,21 +59,16 @@ local S = {
 	},
 }
 
-local ESPStore = {} -- [player] = { billboard, lines, highlight }
-local FOVCircle = nil
-local Connections = {}
+local ESPStore = {}
+local FOVGui = nil
 local LightingBackup = nil
-local PotatoApplied = false
+local SilentTarget = nil
+local SilentHooked = false
+local espTick = 0
 
 ----------------------------------------------------------------------
 -- Helpers
 ----------------------------------------------------------------------
-local function safe(fn, ...)
-	local ok, a, b = pcall(fn, ...)
-	if ok then return a, b end
-	return nil
-end
-
 local function getChar(plr)
 	return plr and plr.Character
 end
@@ -84,8 +85,7 @@ local function getRoot(char)
 end
 
 local function getPart(char, name)
-	if not char then return nil end
-	return char:FindFirstChild(name)
+	return char and char:FindFirstChild(name)
 end
 
 local function isAlive(plr)
@@ -95,24 +95,13 @@ local function isAlive(plr)
 end
 
 local function sameTeam(plr)
-	if not S.Combat.TeamCheck and not S.ESP.TeamCheck then return false end
 	if not LP.Team or not plr.Team then return false end
 	return LP.Team == plr.Team
 end
 
 local function worldToScreen(pos)
 	local v, on = Camera:WorldToViewportPoint(pos)
-	return Vector2.new(v.X, v.Y), on, v.Z
-end
-
-local function equippedToolName(char)
-	if not char then return nil end
-	local tool = char:FindFirstChildOfClass("Tool")
-	if tool then return tool.Name end
-	local ok, inv = pcall(function()
-		return LP:FindFirstChild("Backpack")
-	end)
-	return nil
+	return Vector2.new(v.X, v.Y), on and v.Z > 0, v.Z
 end
 
 local function equippedOf(plr)
@@ -122,26 +111,26 @@ local function equippedOf(plr)
 	return tool and tool.Name or "—"
 end
 
-local function aimTargetPart(char)
-	local prefer = S.Combat.AimPart or "Head"
-	return getPart(char, prefer) or getPart(char, "Head") or getRoot(char)
+local function aimPart(char)
+	local n = S.Combat.AimPart or "Head"
+	return getPart(char, n) or getPart(char, "Head") or getRoot(char)
+end
+
+local function guiParent()
+	local ok, h = pcall(function()
+		return gethui and gethui()
+	end)
+	if ok and h then return h end
+	return CoreGui
 end
 
 ----------------------------------------------------------------------
--- FOV circle (Drawing if available, else ScreenGui fallback)
+-- FOV circle (ScreenGui only — safe on mobile)
 ----------------------------------------------------------------------
 local function destroyFOV()
-	if FOVCircle then
-		pcall(function() FOVCircle:Remove() end)
-		pcall(function() FOVCircle:Destroy() end)
-		FOVCircle = nil
-	end
-	local g = CoreGui:FindFirstChild("xadra_fov")
-	if g then g:Destroy() end
-	local pg = LP:FindFirstChild("PlayerGui")
-	if pg then
-		local g2 = pg:FindFirstChild("xadra_fov")
-		if g2 then g2:Destroy() end
+	if FOVGui then
+		pcall(function() FOVGui:Destroy() end)
+		FOVGui = nil
 	end
 end
 
@@ -149,106 +138,51 @@ local function ensureFOV()
 	destroyFOV()
 	if not S.Combat.ShowFOV then return end
 
-	if Drawing and typeof(Drawing.new) == "function" then
-		local c = Drawing.new("Circle")
-		c.Thickness = 1.5
-		c.NumSides = 64
-		c.Radius = S.Combat.FOV
-		c.Filled = false
-		c.Transparency = 0.85
-		c.Color = Color3.fromRGB(120, 200, 255)
-		c.Visible = true
-		FOVCircle = c
-		return
-	end
-
-	-- ScreenGui ring fallback
-	local parent = (gethui and gethui()) or CoreGui
 	local sg = Instance.new("ScreenGui")
-	sg.Name = "xadra_fov"
+	sg.Name = "xa_fov"
 	sg.IgnoreGuiInset = true
 	sg.ResetOnSpawn = false
-	sg.Parent = parent
+	sg.DisplayOrder = 100
+	sg.Parent = guiParent()
 
 	local ring = Instance.new("Frame")
 	ring.Name = "Ring"
 	ring.AnchorPoint = Vector2.new(0.5, 0.5)
-	ring.Position = UDim2.fromScale(0.5, 0.5)
 	ring.BackgroundTransparency = 1
 	ring.Parent = sg
 	Instance.new("UICorner", ring).CornerRadius = UDim.new(1, 0)
 	local st = Instance.new("UIStroke", ring)
+	st.Name = "Stroke"
 	st.Color = Color3.fromRGB(120, 200, 255)
-	st.Thickness = 1.5
-	st.Transparency = 0.35
-	FOVCircle = sg
+	st.Thickness = IS_MOBILE and 2 or 1.5
+	st.Transparency = 0.4
+
+	FOVGui = sg
 end
 
 local function updateFOV()
 	if not S.Combat.ShowFOV then
-		destroyFOV()
+		if FOVGui then destroyFOV() end
 		return
 	end
-	if not FOVCircle then ensureFOV() end
-	if not FOVCircle then return end
-
+	if not FOVGui then ensureFOV() end
+	if not FOVGui then return end
+	local ring = FOVGui:FindFirstChild("Ring")
+	if not ring then return end
 	local vp = Camera.ViewportSize
-	local center = Vector2.new(vp.X / 2, vp.Y / 2)
-
-	if typeof(FOVCircle) == "Instance" then
-		local ring = FOVCircle:FindFirstChild("Ring")
-		if ring then
-			local d = S.Combat.FOV * 2
-			ring.Size = UDim2.fromOffset(d, d)
-			ring.Position = UDim2.fromOffset(center.X, center.Y)
-		end
-	else
-		-- Drawing
-		pcall(function()
-			FOVCircle.Position = center
-			FOVCircle.Radius = S.Combat.FOV
-			FOVCircle.Visible = true
-		end)
-	end
+	local d = math.clamp(S.Combat.FOV * 2, 40, math.min(vp.X, vp.Y) * 0.95)
+	ring.Size = UDim2.fromOffset(d, d)
+	ring.Position = UDim2.fromOffset(vp.X * 0.5, vp.Y * 0.5)
 end
 
 ----------------------------------------------------------------------
--- ESP
+-- ESP (Highlight + Billboard, no Drawing on mobile)
 ----------------------------------------------------------------------
-local SKELETON = {
-	{ "Head", "UpperTorso" },
-	{ "UpperTorso", "LowerTorso" },
-	{ "UpperTorso", "LeftUpperArm" },
-	{ "LeftUpperArm", "LeftLowerArm" },
-	{ "LeftLowerArm", "LeftHand" },
-	{ "UpperTorso", "RightUpperArm" },
-	{ "RightUpperArm", "RightLowerArm" },
-	{ "RightLowerArm", "RightHand" },
-	{ "LowerTorso", "LeftUpperLeg" },
-	{ "LeftUpperLeg", "LeftLowerLeg" },
-	{ "LeftLowerLeg", "LeftFoot" },
-	{ "LowerTorso", "RightUpperLeg" },
-	{ "RightUpperLeg", "RightLowerLeg" },
-	{ "RightLowerLeg", "RightFoot" },
-	-- R6 fallbacks handled if parts missing
-	{ "Head", "Torso" },
-	{ "Torso", "Left Arm" },
-	{ "Torso", "Right Arm" },
-	{ "Torso", "Left Leg" },
-	{ "Torso", "Right Leg" },
-}
-
 local function clearESP(plr)
 	local pack = ESPStore[plr]
 	if not pack then return end
-	if pack.billboard then pcall(function() pack.billboard:Destroy() end) end
-	if pack.highlight then pcall(function() pack.highlight:Destroy() end) end
-	if pack.lines then
-		for _, ln in ipairs(pack.lines) do
-			pcall(function() ln:Remove() end)
-			pcall(function() ln:Destroy() end)
-		end
-	end
+	pcall(function() if pack.bb then pack.bb:Destroy() end end)
+	pcall(function() if pack.hl then pack.hl:Destroy() end end)
 	ESPStore[plr] = nil
 end
 
@@ -261,71 +195,48 @@ end
 local function makeESP(plr)
 	clearESP(plr)
 	if plr == LP then return end
-
 	local char = getChar(plr)
 	if not char then return end
 
-	local pack = { lines = {} }
-
-	-- soft highlight (depth)
+	local pack = {}
 	local hl = Instance.new("Highlight")
-	hl.Name = "xa_hl"
 	hl.Adornee = char
-	hl.FillTransparency = 0.85
-	hl.OutlineTransparency = 0.35
+	hl.FillTransparency = 0.88
+	hl.OutlineTransparency = 0.4
 	hl.FillColor = Color3.fromRGB(90, 160, 255)
 	hl.OutlineColor = Color3.fromRGB(180, 220, 255)
 	hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 	hl.Parent = char
-	pack.highlight = hl
+	pack.hl = hl
 
-	-- name / tool billboard
-	local root = getRoot(char) or char:FindFirstChild("Head")
+	local root = getRoot(char) or getPart(char, "Head")
 	if root then
 		local bb = Instance.new("BillboardGui")
-		bb.Name = "xa_bb"
 		bb.Adornee = root
-		bb.Size = UDim2.fromOffset(200, 40)
+		bb.Size = UDim2.fromOffset(IS_MOBILE and 220 or 200, IS_MOBILE and 48 or 40)
 		bb.StudsOffset = Vector3.new(0, 3.2, 0)
 		bb.AlwaysOnTop = true
 		bb.MaxDistance = S.ESP.MaxDist
 		bb.Parent = char
 
 		local label = Instance.new("TextLabel")
-		label.Name = "Txt"
 		label.BackgroundTransparency = 1
 		label.Size = UDim2.fromScale(1, 1)
 		label.Font = Enum.Font.GothamMedium
 		label.TextSize = S.ESP.TextSize
 		label.TextColor3 = Color3.fromRGB(235, 240, 255)
-		label.TextStrokeTransparency = 0.5
+		label.TextStrokeTransparency = 0.45
 		label.Text = plr.Name
 		label.Parent = bb
-		pack.billboard = bb
+		pack.bb = bb
 		pack.label = label
-	end
-
-	-- skeleton lines (Drawing)
-	if Drawing and S.ESP.ShowSkeleton then
-		for _ = 1, 18 do
-			local ln = Drawing.new("Line")
-			ln.Thickness = 1
-			ln.Color = Color3.fromRGB(160, 210, 255)
-			ln.Transparency = 0.3
-			ln.Visible = false
-			table.insert(pack.lines, ln)
-		end
 	end
 
 	ESPStore[plr] = pack
 end
 
 local function refreshESPPlayer(plr)
-	if not S.ESP.Enabled then
-		clearESP(plr)
-		return
-	end
-	if plr == LP or not isAlive(plr) then
+	if not S.ESP.Enabled or plr == LP or not isAlive(plr) then
 		clearESP(plr)
 		return
 	end
@@ -334,12 +245,10 @@ local function refreshESPPlayer(plr)
 		return
 	end
 	local myRoot = getRoot(getChar(LP))
-	local theirRoot = getRoot(getChar(plr))
-	if myRoot and theirRoot then
-		if (myRoot.Position - theirRoot.Position).Magnitude > S.ESP.MaxDist then
-			clearESP(plr)
-			return
-		end
+	local their = getRoot(getChar(plr))
+	if myRoot and their and (myRoot.Position - their.Position).Magnitude > S.ESP.MaxDist then
+		clearESP(plr)
+		return
 	end
 	if not ESPStore[plr] then
 		makeESP(plr)
@@ -349,93 +258,91 @@ end
 local function updateESPFrame()
 	if not S.ESP.Enabled then return end
 	local myRoot = getRoot(getChar(LP))
-
 	for plr, pack in pairs(ESPStore) do
 		if not isAlive(plr) then
 			clearESP(plr)
-			continue
-		end
-		local char = getChar(plr)
-		local root = getRoot(char)
-		if not root then
-			clearESP(plr)
-			continue
-		end
-
-		local dist = myRoot and (myRoot.Position - root.Position).Magnitude or 0
-		if dist > S.ESP.MaxDist then
-			clearESP(plr)
-			continue
-		end
-
-		-- billboard text
-		if pack.label then
-			local parts = {}
-			if S.ESP.ShowName then
-				table.insert(parts, plr.DisplayName ~= plr.Name and (plr.DisplayName .. " (@" .. plr.Name .. ")") or plr.Name)
-			end
-			if S.ESP.ShowTool then
-				table.insert(parts, equippedOf(plr))
-			end
-			table.insert(parts, string.format("[%dm]", math.floor(dist)))
-			pack.label.Text = table.concat(parts, " · ")
-			pack.label.TextSize = S.ESP.TextSize
-			if pack.billboard then
-				pack.billboard.MaxDistance = S.ESP.MaxDist
-			end
-		end
-
-		-- skeleton
-		if S.ESP.ShowSkeleton and pack.lines and #pack.lines > 0 then
-			local idx = 1
-			for _, pair in ipairs(SKELETON) do
-				local a = getPart(char, pair[1])
-				local b = getPart(char, pair[2])
-				local ln = pack.lines[idx]
-				if ln and a and b then
-					local pa, oa = worldToScreen(a.Position)
-					local pb, ob = worldToScreen(b.Position)
-					if oa and ob then
-						ln.From = pa
-						ln.To = pb
-						ln.Visible = true
-					else
-						ln.Visible = false
+		else
+			local char = getChar(plr)
+			local root = getRoot(char)
+			if not root then
+				clearESP(plr)
+			else
+				local dist = myRoot and (myRoot.Position - root.Position).Magnitude or 0
+				if dist > S.ESP.MaxDist then
+					clearESP(plr)
+				elseif pack.label then
+					local parts = {}
+					if S.ESP.ShowName then
+						table.insert(parts, plr.Name)
 					end
-					idx += 1
+					if S.ESP.ShowTool then
+						table.insert(parts, equippedOf(plr))
+					end
+					table.insert(parts, string.format("%dm", math.floor(dist)))
+					pack.label.Text = table.concat(parts, " · ")
+					pack.label.TextSize = S.ESP.TextSize
+					-- focus player → red name
+					local focus = (S.ESP.FocusName or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+					local isFocus = false
+					if focus ~= "" then
+						local n = plr.Name:lower()
+						local d = (plr.DisplayName or ""):lower()
+						if n == focus or d == focus or n:find(focus, 1, true) or d:find(focus, 1, true) then
+							isFocus = true
+						end
+					end
+					if isFocus then
+						pack.label.TextColor3 = Color3.fromRGB(255, 60, 60)
+						pack.label.TextStrokeTransparency = 0.2
+						if pack.hl then
+							pack.hl.OutlineColor = Color3.fromRGB(255, 50, 50)
+							pack.hl.FillColor = Color3.fromRGB(255, 80, 80)
+							pack.hl.FillTransparency = 0.75
+						end
+					else
+						pack.label.TextColor3 = Color3.fromRGB(235, 240, 255)
+						pack.label.TextStrokeTransparency = 0.45
+						if pack.hl then
+							pack.hl.OutlineColor = Color3.fromRGB(180, 220, 255)
+							pack.hl.FillColor = Color3.fromRGB(90, 160, 255)
+							pack.hl.FillTransparency = 0.88
+						end
+					end
+					if pack.bb then
+						pack.bb.MaxDistance = S.ESP.MaxDist
+					end
 				end
-			end
-			for i = idx, #pack.lines do
-				pack.lines[i].Visible = false
-			end
-		elseif pack.lines then
-			for _, ln in ipairs(pack.lines) do
-				ln.Visible = false
 			end
 		end
 	end
 end
 
 ----------------------------------------------------------------------
--- Combat: FOV target + silent aim (bullets → target without moving crosshair)
+-- Combat targeting
 ----------------------------------------------------------------------
-local Mouse = LP:GetMouse()
-local SilentTarget = nil -- BasePart inside FOV
-local SilentHooked = false
-
 local function getBestTarget()
 	local best, bestScore = nil, math.huge
 	local vp = Camera.ViewportSize
-	local center = Vector2.new(vp.X / 2, vp.Y / 2)
+	local center = Vector2.new(vp.X * 0.5, vp.Y * 0.5)
 	local fov = S.Combat.FOV
+	local maxDist = S.Combat.MaxDist
+	local myRoot = getRoot(getChar(LP))
 
 	for _, plr in ipairs(Players:GetPlayers()) do
 		if plr ~= LP and isAlive(plr) then
 			if not (S.Combat.TeamCheck and sameTeam(plr)) then
-				local part = aimTargetPart(getChar(plr))
+				local part = aimPart(getChar(plr))
+				if part then
+					if myRoot then
+						local wd = (myRoot.Position - part.Position).Magnitude
+						if wd > maxDist then
+							part = nil
+						end
+					end
+				end
 				if part then
 					local sp, onScreen, depth = worldToScreen(part.Position)
-					if onScreen and depth > 0 then
+					if onScreen then
 						local dist2d = (sp - center).Magnitude
 						if dist2d <= fov then
 							local score = dist2d + depth * 0.02
@@ -452,36 +359,32 @@ local function getBestTarget()
 	return best
 end
 
--- Aimbot only: smooth camera toward target
 local function applyAimbot(dt)
 	if not S.Combat.Aimbot then return end
-	local target = SilentTarget or getBestTarget()
-	if not target then return end
+	local target = SilentTarget
+	if not target or not target.Parent then return end
 	local origin = Camera.CFrame.Position
 	local goal = CFrame.lookAt(origin, target.Position)
-	local alpha = math.clamp((1 - (S.Combat.Smooth or 0.18)) * (dt * 60), 0.05, 1)
+	local alpha = math.clamp((1 - (S.Combat.Smooth or 0.22)) * (dt * 60), 0.04, 1)
 	Camera.CFrame = Camera.CFrame:Lerp(goal, alpha)
 end
 
--- True silent: spoof Mouse.Hit / Target / UnitRay + Workspace Raycast direction
+----------------------------------------------------------------------
+-- Silent aim — mobile-safe hooks
+-- Prefer hookmetamethod; avoid double namecall crash on mobile
+----------------------------------------------------------------------
 local function installSilentHooks()
-	if SilentHooked then return end
-	if type(getrawmetatable) ~= "function" then
-		warn("[x adra] getrawmetatable unavailable — silent aim limited")
-		return
+	if SilentHooked then return true end
+
+	local function wrap(fn)
+		if type(newcclosure) == "function" then
+			local ok, r = pcall(newcclosure, fn)
+			if ok and r then return r end
+		end
+		return fn
 	end
-	SilentHooked = true
 
-	local mt = getrawmetatable(game)
-	local oldIndex = mt.__index
-	local oldNamecall = mt.__namecall
-	local nc = newcclosure or function(f) return f end
-
-	pcall(function()
-		if setreadonly then setreadonly(mt, false) end
-	end)
-
-	mt.__index = nc(function(self, key)
+	local function indexHook(self, key)
 		if S.Combat.Silent and SilentTarget and SilentTarget.Parent then
 			if self == Mouse then
 				if key == "Hit" then
@@ -490,72 +393,83 @@ local function installSilentHooks()
 					return SilentTarget
 				elseif key == "UnitRay" then
 					local origin = Camera.CFrame.Position
-					local dir = (SilentTarget.Position - origin)
-					if dir.Magnitude < 0.01 then
-						dir = Camera.CFrame.LookVector
+					local dir = SilentTarget.Position - origin
+					if dir.Magnitude < 0.05 then
+						dir = Camera.CFrame.LookVector * 2048
 					else
-						dir = dir.Unit
+						dir = dir.Unit * 2048
 					end
-					return Ray.new(origin, dir * 2048)
+					return Ray.new(origin, dir)
 				end
 			end
 		end
-		return oldIndex(self, key)
-	end)
-
-	mt.__namecall = nc(function(self, ...)
-		local method = getnamecallmethod and getnamecallmethod() or ""
-		local args = { ... }
-
-		if S.Combat.Silent and SilentTarget and SilentTarget.Parent then
-			-- redirect spatial raycasts used by many gun scripts
-			if method == "Raycast" and self == workspace then
-				local origin = args[1]
-				local direction = args[2]
-				local params = args[3]
-				if typeof(origin) == "Vector3" and typeof(direction) == "Vector3" then
-					local mag = direction.Magnitude
-					if mag < 1 then mag = 1000 end
-					local dir = (SilentTarget.Position - origin)
-					if dir.Magnitude > 0.05 then
-						args[2] = dir.Unit * mag
-					end
-					return oldNamecall(self, table.unpack(args))
-				end
-			end
-			-- some engines use FindPartOnRay / FindPartOnRayWithIgnoreList
-			if (method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist") then
-				local ray = args[1]
-				if typeof(ray) == "Ray" then
-					local origin = ray.Origin
-					local dir = (SilentTarget.Position - origin)
-					if dir.Magnitude > 0.05 then
-						args[1] = Ray.new(origin, dir.Unit * math.max(ray.Direction.Magnitude, 1000))
-					end
-					return oldNamecall(self, table.unpack(args))
-				end
-			end
-		end
-
-		return oldNamecall(self, table.unpack(args))
-	end)
-
-	print("[x adra] Silent hooks installed (Mouse + Raycast)")
-end
-
-local function updateSilentTarget()
-	if S.Combat.Silent or S.Combat.Aimbot then
-		SilentTarget = getBestTarget()
-	else
-		SilentTarget = nil
+		return nil -- signal miss
 	end
+
+	-- Method A: hookmetamethod (most executors, safer)
+	if type(hookmetamethod) == "function" then
+		local ok = pcall(function()
+			local oldIndex
+			oldIndex = hookmetamethod(game, "__index", wrap(function(self, key)
+				local hit = indexHook(self, key)
+				if hit ~= nil then return hit end
+				return oldIndex(self, key)
+			end))
+		end)
+		if ok then
+			SilentHooked = true
+			print("[x adra] silent: hookmetamethod __index")
+			-- optional raycast redirect (skip on weak mobile if fails)
+			pcall(function()
+				local oldNc
+				oldNc = hookmetamethod(game, "__namecall", wrap(function(self, ...)
+					local method = getnamecallmethod()
+					if S.Combat.Silent and SilentTarget and SilentTarget.Parent and method == "Raycast" and self == workspace then
+						local a = { ... }
+						if typeof(a[1]) == "Vector3" and typeof(a[2]) == "Vector3" then
+							local mag = a[2].Magnitude
+							if mag < 1 then mag = 1000 end
+							local d = SilentTarget.Position - a[1]
+							if d.Magnitude > 0.05 then
+								a[2] = d.Unit * mag
+							end
+							return oldNc(self, table.unpack(a))
+						end
+					end
+					return oldNc(self, ...)
+				end))
+			end)
+			return true
+		end
+	end
+
+	-- Method B: getrawmetatable (desktop fallback)
+	if type(getrawmetatable) == "function" and not IS_MOBILE then
+		local ok = pcall(function()
+			local mt = getrawmetatable(game)
+			local oldIndex = mt.__index
+			if setreadonly then setreadonly(mt, false) end
+			mt.__index = wrap(function(self, key)
+				local hit = indexHook(self, key)
+				if hit ~= nil then return hit end
+				return oldIndex(self, key)
+			end)
+		end)
+		if ok then
+			SilentHooked = true
+			print("[x adra] silent: getrawmetatable __index")
+			return true
+		end
+	end
+
+	warn("[x adra] silent hooks unavailable on this executor")
+	return false
 end
 
 ----------------------------------------------------------------------
 -- Visual
 ----------------------------------------------------------------------
 local function setFullbright(on)
-	S.Visual.Fullbright = on
 	if on then
 		if not LightingBackup then
 			LightingBackup = {
@@ -573,70 +487,35 @@ local function setFullbright(on)
 		Lighting.GlobalShadows = false
 		Lighting.Ambient = Color3.fromRGB(200, 200, 200)
 		Lighting.OutdoorAmbient = Color3.fromRGB(180, 180, 180)
-	else
-		if LightingBackup then
-			for k, v in pairs(LightingBackup) do
-				pcall(function() Lighting[k] = v end)
-			end
+	elseif LightingBackup then
+		for k, v in pairs(LightingBackup) do
+			pcall(function() Lighting[k] = v end)
 		end
 	end
 end
 
 local function setPotato(on)
-	S.Visual.Potato = on
 	if on then
-		PotatoApplied = true
-		settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
 		pcall(function()
-			Lighting.GlobalShadows = false
-			Lighting.FogEnd = 250
-			Lighting.Brightness = 1
+			settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
 		end)
-		-- strip heavy effects
+		Lighting.GlobalShadows = false
+		Lighting.FogEnd = 200
 		for _, v in ipairs(Lighting:GetChildren()) do
-			if v:IsA("BloomEffect") or v:IsA("BlurEffect") or v:IsA("SunRaysEffect")
-				or v:IsA("ColorCorrectionEffect") or v:IsA("DepthOfFieldEffect") then
+			if v:IsA("PostEffect") then
 				pcall(function() v.Enabled = false end)
 			end
 		end
 	else
-		if PotatoApplied then
-			pcall(function()
-				settings().Rendering.QualityLevel = Enum.QualityLevel.Automatic
-			end)
-		end
+		pcall(function()
+			settings().Rendering.QualityLevel = Enum.QualityLevel.Automatic
+		end)
 	end
 end
 
 ----------------------------------------------------------------------
--- Bind loops
+-- Players bind
 ----------------------------------------------------------------------
-local function bindPlayers()
-	for _, plr in ipairs(Players:GetPlayers()) do
-		if plr ~= LP then
-			plr.CharacterAdded:Connect(function()
-				task.wait(0.4)
-				if S.ESP.Enabled then refreshESPPlayer(plr) end
-			end)
-			plr.CharacterRemoving:Connect(function()
-				clearESP(plr)
-			end)
-		end
-	end
-	Players.PlayerAdded:Connect(function(plr)
-		plr.CharacterAdded:Connect(function()
-			task.wait(0.4)
-			if S.ESP.Enabled then refreshESPPlayer(plr) end
-		end)
-		plr.CharacterRemoving:Connect(function()
-			clearESP(plr)
-		end)
-	end)
-	Players.PlayerRemoving:Connect(function(plr)
-		clearESP(plr)
-	end)
-end
-
 local function setESPEnabled(on)
 	S.ESP.Enabled = on
 	if on then
@@ -648,50 +527,75 @@ local function setESPEnabled(on)
 	end
 end
 
--- main heartbeat (throttled pieces)
-local acc = 0
-Connections.hb = RunService.RenderStepped:Connect(function(dt)
+for _, plr in ipairs(Players:GetPlayers()) do
+	if plr ~= LP then
+		plr.CharacterAdded:Connect(function()
+			task.wait(0.5)
+			if S.ESP.Enabled then refreshESPPlayer(plr) end
+		end)
+		plr.CharacterRemoving:Connect(function()
+			clearESP(plr)
+		end)
+	end
+end
+Players.PlayerAdded:Connect(function(plr)
+	plr.CharacterAdded:Connect(function()
+		task.wait(0.5)
+		if S.ESP.Enabled then refreshESPPlayer(plr) end
+	end)
+	plr.CharacterRemoving:Connect(function()
+		clearESP(plr)
+	end)
+end)
+Players.PlayerRemoving:Connect(clearESP)
+
+----------------------------------------------------------------------
+-- Main loop (lighter on mobile)
+----------------------------------------------------------------------
+local ESP_INTERVAL = IS_MOBILE and 0.12 or 0.05
+
+RunService.RenderStepped:Connect(function(dt)
 	updateFOV()
-	updateSilentTarget()
+
+	if S.Combat.Silent or S.Combat.Aimbot then
+		SilentTarget = getBestTarget()
+	else
+		SilentTarget = nil
+	end
+
 	applyAimbot(dt)
-	acc += dt
-	if acc >= 0.05 then
-		acc = 0
-		if S.ESP.Enabled then
-			-- periodic rebuild check
+
+	espTick += dt
+	if S.ESP.Enabled then
+		if espTick >= ESP_INTERVAL then
+			espTick = 0
 			for _, plr in ipairs(Players:GetPlayers()) do
 				if plr ~= LP and isAlive(plr) and not ESPStore[plr] then
 					refreshESPPlayer(plr)
 				end
 			end
-			updateESPFrame()
 		end
-	else
-		if S.ESP.Enabled then
-			updateESPFrame()
-		end
+		updateESPFrame()
 	end
 end)
 
-bindPlayers()
-
 ----------------------------------------------------------------------
--- WindUI
+-- UI
 ----------------------------------------------------------------------
-local isMobile = UIS.TouchEnabled and not UIS.KeyboardEnabled
-local winSize = isMobile and UDim2.fromOffset(300, 400) or UDim2.fromOffset(420, 480)
+local winW = IS_MOBILE and 290 or 400
+local winH = IS_MOBILE and 360 or 460
 
 local Window = WindUI:CreateWindow({
 	Title = "x adra",
 	Icon = "crosshair",
-	Author = "Degrade",
+	Author = IS_MOBILE and "Degrade · Mobile" or "Degrade",
 	Folder = "xadra_degrade",
-	Size = winSize,
+	Size = UDim2.fromOffset(winW, winH),
 	Transparent = true,
 	Theme = "Dark",
 })
 
--- ESP tab
+-- ESP
 local TabESP = Window:Tab({ Title = "ESP", Icon = "eye" })
 TabESP:Section({ Title = "Players" })
 
@@ -703,10 +607,8 @@ TabESP:Toggle({
 
 TabESP:Slider({
 	Title = "Max Distance",
-	Value = { Min = 50, Max = 1000, Default = 400 },
-	Callback = function(v)
-		S.ESP.MaxDist = v
-	end,
+	Value = { Min = 50, Max = 2000, Default = S.ESP.MaxDist },
+	Callback = function(v) S.ESP.MaxDist = v end,
 })
 
 TabESP:Toggle({
@@ -717,7 +619,7 @@ TabESP:Toggle({
 
 TabESP:Slider({
 	Title = "Text Size",
-	Value = { Min = 10, Max = 28, Default = 14 },
+	Value = { Min = 10, Max = 28, Default = S.ESP.TextSize },
 	Callback = function(v) S.ESP.TextSize = v end,
 })
 
@@ -728,27 +630,26 @@ TabESP:Toggle({
 })
 
 TabESP:Toggle({
-	Title = "Skeleton",
-	Value = true,
-	Callback = function(v)
-		S.ESP.ShowSkeleton = v
-		-- rebuild to recreate lines
-		if S.ESP.Enabled then
-			clearAllESP()
-			for _, plr in ipairs(Players:GetPlayers()) do
-				refreshESPPlayer(plr)
-			end
-		end
-	end,
-})
-
-TabESP:Toggle({
 	Title = "Team Check",
 	Value = false,
 	Callback = function(v) S.ESP.TeamCheck = v end,
 })
 
--- Combat tab
+TabESP:Input({
+	Title = "Red Name (player)",
+	Value = "",
+	Placeholder = "username or display name",
+	Callback = function(v)
+		S.ESP.FocusName = tostring(v or "")
+	end,
+})
+
+TabESP:Paragraph({
+	Title = "Focus",
+	Desc = "Игрок с этим ником/display name подсвечивается красным (ник + outline).",
+})
+
+-- Combat
 local TabCombat = Window:Tab({ Title = "Combat", Icon = "crosshair" })
 TabCombat:Section({ Title = "Aim" })
 
@@ -763,16 +664,39 @@ TabCombat:Toggle({
 	Value = false,
 	Callback = function(v)
 		S.Combat.Silent = v
-		if v then installSilentHooks() end
+		if v then
+			local ok = false
+			pcall(function()
+				ok = installSilentHooks()
+			end)
+			if not ok and not SilentHooked then
+				S.Combat.Silent = false
+				pcall(function()
+					WindUI:Notify({
+						Title = "Silent Aim",
+						Content = "Hooks failed on this executor — try another build",
+						Duration = 4,
+					})
+				end)
+			end
+		end
 	end,
 })
 
 TabCombat:Slider({
 	Title = "FOV Radius",
-	Value = { Min = 20, Max = 400, Default = 120 },
+	Value = { Min = 30, Max = 350, Default = S.Combat.FOV },
 	Callback = function(v)
 		S.Combat.FOV = v
 		updateFOV()
+	end,
+})
+
+TabCombat:Slider({
+	Title = "Aim Max Distance",
+	Value = { Min = 50, Max = 800, Default = S.Combat.MaxDist },
+	Callback = function(v)
+		S.Combat.MaxDist = v
 	end,
 })
 
@@ -787,10 +711,8 @@ TabCombat:Toggle({
 
 TabCombat:Slider({
 	Title = "Aimbot Smooth",
-	Value = { Min = 0, Max = 90, Default = 18 },
-	Callback = function(v)
-		S.Combat.Smooth = v / 100
-	end,
+	Value = { Min = 0, Max = 90, Default = math.floor(S.Combat.Smooth * 100) },
+	Callback = function(v) S.Combat.Smooth = v / 100 end,
 })
 
 TabCombat:Dropdown({
@@ -807,11 +729,11 @@ TabCombat:Toggle({
 })
 
 TabCombat:Paragraph({
-	Title = "Silent Aim",
-	Desc = "If an enemy is inside the FOV circle, your shots go to them without moving the crosshair (Mouse.Hit + Raycast redirect).",
+	Title = "Silent",
+	Desc = "Enemy in FOV circle + within Aim Max Distance → shots redirect without moving crosshair. Mobile uses safer hooks.",
 })
 
--- Visual tab
+-- Visual
 local TabVis = Window:Tab({ Title = "Visual", Icon = "sun" })
 TabVis:Section({ Title = "World" })
 
@@ -827,25 +749,16 @@ TabVis:Toggle({
 	Callback = function(v) setPotato(v) end,
 })
 
-TabVis:Paragraph({
-	Title = "Potato",
-	Desc = "Low quality + disables heavy lighting effects for FPS.",
-})
-
--- init FOV
 if S.Combat.ShowFOV then
 	ensureFOV()
 end
 
--- prepare silent hooks early (active only while toggle is on)
-pcall(installSilentHooks)
-
 pcall(function()
 	WindUI:Notify({
 		Title = "x adra",
-		Content = "Degrade · ESP / Combat / Visual",
+		Content = IS_MOBILE and "Degrade · Mobile" or "Degrade loaded",
 		Duration = 3,
 	})
 end)
 
-print("[x adra] Degrade loaded")
+print("[x adra] Degrade ready · mobile=", IS_MOBILE)
