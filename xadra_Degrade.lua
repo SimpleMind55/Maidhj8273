@@ -417,8 +417,12 @@ local function updateESPFrame()
 end
 
 ----------------------------------------------------------------------
--- Combat: target selection + aim
+-- Combat: FOV target + silent aim (bullets → target without moving crosshair)
 ----------------------------------------------------------------------
+local Mouse = LP:GetMouse()
+local SilentTarget = nil -- BasePart inside FOV
+local SilentHooked = false
+
 local function getBestTarget()
 	local best, bestScore = nil, math.huge
 	local vp = Camera.ViewportSize
@@ -434,7 +438,6 @@ local function getBestTarget()
 					if onScreen and depth > 0 then
 						local dist2d = (sp - center).Magnitude
 						if dist2d <= fov then
-							-- prefer closer to crosshair, then closer in world
 							local score = dist2d + depth * 0.02
 							if score < bestScore then
 								bestScore = score
@@ -449,22 +452,102 @@ local function getBestTarget()
 	return best
 end
 
--- Silent-style: steer camera look toward target when in FOV (no remote hooks → less noisy)
-local function applyAim(dt)
-	if not (S.Combat.Aimbot or S.Combat.Silent) then return end
-	local target = getBestTarget()
+-- Aimbot only: smooth camera toward target
+local function applyAimbot(dt)
+	if not S.Combat.Aimbot then return end
+	local target = SilentTarget or getBestTarget()
 	if not target then return end
-
-	local cam = Camera
-	local origin = cam.CFrame.Position
+	local origin = Camera.CFrame.Position
 	local goal = CFrame.lookAt(origin, target.Position)
-	local alpha = S.Combat.Silent and 1 or math.clamp((S.Combat.Smooth > 0 and (1 - S.Combat.Smooth) or 0.85) * (dt * 60), 0.05, 1)
+	local alpha = math.clamp((1 - (S.Combat.Smooth or 0.18)) * (dt * 60), 0.05, 1)
+	Camera.CFrame = Camera.CFrame:Lerp(goal, alpha)
+end
 
-	if S.Combat.Silent then
-		-- hard snap look (silent feel for hitscan / camera-based guns)
-		cam.CFrame = goal
-	elseif S.Combat.Aimbot then
-		cam.CFrame = cam.CFrame:Lerp(goal, alpha)
+-- True silent: spoof Mouse.Hit / Target / UnitRay + Workspace Raycast direction
+local function installSilentHooks()
+	if SilentHooked then return end
+	if type(getrawmetatable) ~= "function" then
+		warn("[x adra] getrawmetatable unavailable — silent aim limited")
+		return
+	end
+	SilentHooked = true
+
+	local mt = getrawmetatable(game)
+	local oldIndex = mt.__index
+	local oldNamecall = mt.__namecall
+	local nc = newcclosure or function(f) return f end
+
+	pcall(function()
+		if setreadonly then setreadonly(mt, false) end
+	end)
+
+	mt.__index = nc(function(self, key)
+		if S.Combat.Silent and SilentTarget and SilentTarget.Parent then
+			if self == Mouse then
+				if key == "Hit" then
+					return SilentTarget.CFrame
+				elseif key == "Target" then
+					return SilentTarget
+				elseif key == "UnitRay" then
+					local origin = Camera.CFrame.Position
+					local dir = (SilentTarget.Position - origin)
+					if dir.Magnitude < 0.01 then
+						dir = Camera.CFrame.LookVector
+					else
+						dir = dir.Unit
+					end
+					return Ray.new(origin, dir * 2048)
+				end
+			end
+		end
+		return oldIndex(self, key)
+	end)
+
+	mt.__namecall = nc(function(self, ...)
+		local method = getnamecallmethod and getnamecallmethod() or ""
+		local args = { ... }
+
+		if S.Combat.Silent and SilentTarget and SilentTarget.Parent then
+			-- redirect spatial raycasts used by many gun scripts
+			if method == "Raycast" and self == workspace then
+				local origin = args[1]
+				local direction = args[2]
+				local params = args[3]
+				if typeof(origin) == "Vector3" and typeof(direction) == "Vector3" then
+					local mag = direction.Magnitude
+					if mag < 1 then mag = 1000 end
+					local dir = (SilentTarget.Position - origin)
+					if dir.Magnitude > 0.05 then
+						args[2] = dir.Unit * mag
+					end
+					return oldNamecall(self, table.unpack(args))
+				end
+			end
+			-- some engines use FindPartOnRay / FindPartOnRayWithIgnoreList
+			if (method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist") then
+				local ray = args[1]
+				if typeof(ray) == "Ray" then
+					local origin = ray.Origin
+					local dir = (SilentTarget.Position - origin)
+					if dir.Magnitude > 0.05 then
+						args[1] = Ray.new(origin, dir.Unit * math.max(ray.Direction.Magnitude, 1000))
+					end
+					return oldNamecall(self, table.unpack(args))
+				end
+			end
+		end
+
+		return oldNamecall(self, table.unpack(args))
+	end)
+
+	print("[x adra] Silent hooks installed (Mouse + Raycast)")
+end
+
+local function updateSilentTarget()
+	if S.Combat.Silent or S.Combat.Aimbot then
+		SilentTarget = getBestTarget()
+	else
+		SilentTarget = nil
 	end
 end
 
@@ -569,7 +652,8 @@ end
 local acc = 0
 Connections.hb = RunService.RenderStepped:Connect(function(dt)
 	updateFOV()
-	applyAim(dt)
+	updateSilentTarget()
+	applyAimbot(dt)
 	acc += dt
 	if acc >= 0.05 then
 		acc = 0
@@ -677,7 +761,10 @@ TabCombat:Toggle({
 TabCombat:Toggle({
 	Title = "Silent Aim",
 	Value = false,
-	Callback = function(v) S.Combat.Silent = v end,
+	Callback = function(v)
+		S.Combat.Silent = v
+		if v then installSilentHooks() end
+	end,
 })
 
 TabCombat:Slider({
@@ -720,8 +807,8 @@ TabCombat:Toggle({
 })
 
 TabCombat:Paragraph({
-	Title = "Note",
-	Desc = "Silent = hard camera lock in FOV. Aimbot = smooth lock. Works best with camera-based / hitscan weapons.",
+	Title = "Silent Aim",
+	Desc = "If an enemy is inside the FOV circle, your shots go to them without moving the crosshair (Mouse.Hit + Raycast redirect).",
 })
 
 -- Visual tab
@@ -749,6 +836,9 @@ TabVis:Paragraph({
 if S.Combat.ShowFOV then
 	ensureFOV()
 end
+
+-- prepare silent hooks early (active only while toggle is on)
+pcall(installSilentHooks)
 
 pcall(function()
 	WindUI:Notify({
